@@ -37,12 +37,16 @@ def collect_node_connections(
         visited_nodes.add(current_node)
         edges = current_node.edges
         for edge_ in edges:
-            target = edge_._jac_.target
+            target = edge_.target
             if target:
                 connections.add(
-                    (current_node.obj, target._jac_.obj, edge_.__class__.__name__)
+                    (
+                        current_node.architype,
+                        target.architype,
+                        edge_.__class__.__name__,
+                    )
                 )
-                collect_node_connections(target._jac_, visited_nodes, connections)
+                collect_node_connections(target, visited_nodes, connections)
 
 
 def traverse_graph(
@@ -61,17 +65,20 @@ def traverse_graph(
     edge_limit: int,
 ) -> None:
     """Traverse the graph using Breadth-First Search (BFS) or Depth-First Search (DFS)."""
-    for edge in node._jac_.edges:
-        is_self_loop = id(edge._jac_.source) == id(edge._jac_.target)
-        is_in_edge = edge._jac_.target == node
-        if (traverse and is_in_edge) or edge._jac_.obj.__class__.__name__ in edge_type:
+    for edge in node.__jac__.edges:
+        is_self_loop = id(edge.source) == id(edge.target)
+        is_in_edge = edge.target == node.__jac__
+        if (traverse and is_in_edge) or edge.architype.__class__.__name__ in edge_type:
             continue
         if is_self_loop:
             continue  # lets skip self loop for a while, need to handle it later
-        else:
-            other_nd = edge._jac_.target if not is_in_edge else edge._jac_.source
+        elif (other_nda := edge.target if not is_in_edge else edge.source) and (
+            other_nd := other_nda.architype
+        ):
             new_con = (
-                (node, other_nd, edge) if not is_in_edge else (other_nd, node, edge)
+                (node, other_nd, edge.architype)
+                if not is_in_edge
+                else (other_nd, node, edge.architype)
             )
             if node in node_depths and node_depths[node] is not None:
                 if other_nd in node_depths:
@@ -113,18 +120,26 @@ def get_sem_scope(node: ast.AstNode) -> SemScope:
     a = (
         node.name
         if isinstance(node, ast.Module)
-        else node.name.value if isinstance(node, (ast.Enum, ast.Architype)) else ""
+        else (
+            node.name.value
+            if isinstance(node, (ast.Enum, ast.Architype))
+            else node.name_ref.sym_name if isinstance(node, ast.Ability) else ""
+        )
     )
     if isinstance(node, ast.Module):
         return SemScope(a, "Module", None)
-    elif isinstance(node, (ast.Enum, ast.Architype)):
+    elif isinstance(node, (ast.Enum, ast.Architype, ast.Ability)):
         node_type = (
             node.__class__.__name__
             if isinstance(node, ast.Enum)
-            else node.arch_type.value
+            else ("Ability" if isinstance(node, ast.Ability) else node.arch_type.value)
         )
         if node.parent:
-            return SemScope(a, node_type, get_sem_scope(node.parent))
+            return SemScope(
+                a,
+                node_type,
+                get_sem_scope(node.parent),
+            )
     else:
         if node.parent:
             return get_sem_scope(node.parent)

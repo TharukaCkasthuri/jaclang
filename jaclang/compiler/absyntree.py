@@ -158,7 +158,7 @@ class AstNode:
         """Get parent of type."""
         from jaclang.compiler.passes import Pass
 
-        return Pass.has_parent_of_type(node=self, typ=typ)
+        return Pass.find_parent_of_type(node=self, typ=typ)
 
     def parent_of_type(self, typ: Type[T]) -> T:
         """Get parent of type."""
@@ -630,8 +630,11 @@ class Module(AstDocNode):
         self.impl_mod: list[Module] = []
         self.test_mod: list[Module] = []
         self.mod_deps: dict[str, Module] = {}
+        self.py_mod_dep_map: dict[str, str] = {}
+        self.py_raise_map: dict[str, str] = {}
         self.registry = registry
         self.terminals: list[Token] = terminals
+        self.is_raised_from_py: bool = False
         AstNode.__init__(self, kid=kid)
         AstDocNode.__init__(self, doc=doc)
 
@@ -858,7 +861,7 @@ class Import(ElementStmt, CodeBlockStmt):
 
     def __init__(
         self,
-        hint: SubTag[Name],
+        hint: Optional[SubTag[Name]],
         from_loc: Optional[ModulePath],
         items: SubNodeList[ModuleItem] | SubNodeList[ModulePath],
         is_absorb: bool,  # For includes
@@ -873,11 +876,52 @@ class Import(ElementStmt, CodeBlockStmt):
         AstNode.__init__(self, kid=kid)
         AstDocNode.__init__(self, doc=doc)
 
+    @property
+    def is_py(self) -> bool:
+        """Check if import is python."""
+        if self.hint and self.hint.tag.value == "py":
+            return True
+        if not self.hint:
+            return not self.__jac_detected
+        return False
+
+    @property
+    def is_jac(self) -> bool:
+        """Check if import is jac."""
+        if self.hint and self.hint.tag.value == "jac":
+            return True
+        if not self.hint:
+            return self.__jac_detected
+        return False
+
+    @property
+    def __jac_detected(self) -> bool:
+        """Check if import is jac."""
+        if self.from_loc:
+            if self.from_loc.resolve_relative_path().endswith(".jac"):
+                return True
+            if os.path.isdir(self.from_loc.resolve_relative_path()):
+                if os.path.exists(
+                    os.path.join(self.from_loc.resolve_relative_path(), "__init__.jac")
+                ):
+                    return True
+                for i in self.items.items:
+                    if isinstance(
+                        i, ModuleItem
+                    ) and self.from_loc.resolve_relative_path(i.name.value).endswith(
+                        ".jac"
+                    ):
+                        return True
+        return any(
+            isinstance(i, ModulePath) and i.resolve_relative_path().endswith(".jac")
+            for i in self.items.items
+        )
+
     def normalize(self, deep: bool = False) -> bool:
         """Normalize import node."""
         res = True
         if deep:
-            res = self.hint.normalize(deep)
+            res = self.hint.normalize(deep) if self.hint else res
             res = res and self.from_loc.normalize(deep) if self.from_loc else res
             res = res and self.items.normalize(deep)
             res = res and self.doc.normalize(deep) if self.doc else res
@@ -888,7 +932,8 @@ class Import(ElementStmt, CodeBlockStmt):
             new_kid.append(self.gen_token(Tok.KW_INCLUDE))
         else:
             new_kid.append(self.gen_token(Tok.KW_IMPORT))
-        new_kid.append(self.hint)
+        if self.hint:
+            new_kid.append(self.hint)
         if self.from_loc:
             new_kid.append(self.gen_token(Tok.KW_FROM))
             new_kid.append(self.from_loc)
@@ -914,6 +959,7 @@ class ModulePath(AstSymbolNode):
         self.level = level
         self.alias = alias
         self.sub_module: Optional[Module] = None
+        self.abs_path: Optional[str] = None
 
         name_spec = alias if alias else path[0] if path else None
 
@@ -935,11 +981,31 @@ class ModulePath(AstSymbolNode):
         )
 
     @property
-    def path_str(self) -> str:
+    def dot_path_str(self) -> str:
         """Get path string."""
         return ("." * self.level) + ".".join(
             [p.value for p in self.path] if self.path else [self.name_spec.sym_name]
         )
+
+    def resolve_relative_path(self, target_item: Optional[str] = None) -> str:
+        """Convert an import target string into a relative file path."""
+        target = self.dot_path_str
+        if target_item:
+            target += f".{target_item}"
+        base_path = os.path.dirname(self.loc.mod_path)
+        base_path = base_path if base_path else os.getcwd()
+        parts = target.split(".")
+        traversal_levels = self.level - 1 if self.level > 0 else 0
+        actual_parts = parts[traversal_levels:]
+        for _ in range(traversal_levels):
+            base_path = os.path.dirname(base_path)
+        relative_path = os.path.join(base_path, *actual_parts)
+        relative_path = (
+            relative_path + ".jac"
+            if os.path.exists(relative_path + ".jac")
+            else relative_path
+        )
+        return relative_path
 
     def normalize(self, deep: bool = False) -> bool:
         """Normalize module path node."""
@@ -986,6 +1052,7 @@ class ModuleItem(AstSymbolNode):
             name_spec=alias if alias else name,
             sym_category=SymbolType.MOD_VAR,
         )
+        self.abs_path: Optional[str] = None
 
     @property
     def from_parent(self) -> Import:
@@ -1127,7 +1194,6 @@ class ArchDef(AstImplOnlyNode):
         body: SubNodeList[ArchBlockStmt],
         kid: Sequence[AstNode],
         doc: Optional[String] = None,
-        decorators: Optional[SubNodeList[Expr]] = None,
         decl_link: Optional[Architype] = None,
     ) -> None:
         """Initialize arch def node."""
@@ -1466,6 +1532,23 @@ class FuncSignature(AstSemStrNode):
             isinstance(self.parent, AbilityDef)
             and isinstance(self.parent.decl_link, Ability)
             and self.parent.decl_link.is_static
+        )
+
+    @property
+    def is_in_py_class(self) -> bool:
+        """Check if the ability belongs to a class."""
+        is_archi = self.find_parent_of_type(Architype)
+        is_class = is_archi is not None and is_archi.arch_type.name == Tok.KW_CLASS
+
+        return (
+            isinstance(self.parent, Ability)
+            and self.parent.is_method is not None
+            and is_class
+        ) or (
+            isinstance(self.parent, AbilityDef)
+            and isinstance(self.parent.decl_link, Ability)
+            and self.parent.decl_link.is_method
+            and is_class
         )
 
 
@@ -4235,11 +4318,11 @@ class Ellipsis(Literal):
 class EmptyToken(Token):
     """EmptyToken node type for Jac Ast."""
 
-    def __init__(self) -> None:
+    def __init__(self, file_path: str = "") -> None:
         """Initialize empty token."""
         super().__init__(
             name="EmptyToken",
-            file_path="",
+            file_path=file_path,
             value="",
             line=0,
             end_line=0,

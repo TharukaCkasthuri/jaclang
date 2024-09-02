@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast as ast3
 import fnmatch
 import html
 import os
@@ -10,12 +11,14 @@ import types
 from collections import OrderedDict
 from dataclasses import field
 from functools import wraps
-from typing import Any, Callable, Optional, Type, Union
+from typing import Any, Callable, Mapping, Optional, Sequence, Type, Union
 
-from jaclang.compiler.absyntree import Module
+import jaclang.compiler.absyntree as ast
 from jaclang.compiler.constant import EdgeDir, colors
+from jaclang.compiler.passes.main.pyast_gen_pass import PyastGenPass
 from jaclang.compiler.semtable import SemInfo, SemRegistry, SemScope
 from jaclang.runtimelib.constructs import (
+    Anchor,
     Architype,
     DSFunc,
     EdgeAnchor,
@@ -23,30 +26,30 @@ from jaclang.runtimelib.constructs import (
     ExecutionContext,
     GenericEdge,
     JacTestCheck,
-    Memory,
     NodeAnchor,
     NodeArchitype,
-    ObjectAnchor,
     Root,
     WalkerAnchor,
     WalkerArchitype,
-    exec_context,
 )
 from jaclang.runtimelib.importer import ImportPathSpec, JacImporter, PythonImporter
+from jaclang.runtimelib.machine import JacMachine, JacProgram
 from jaclang.runtimelib.utils import traverse_graph
 from jaclang.plugin.feature import JacFeature as Jac  # noqa: I100
-from jaclang.plugin.spec import T
+from jaclang.plugin.spec import P, T
 
 
 import pluggy
 
+hookimpl = pluggy.HookimplMarker("jac")
 
 __all__ = [
+    "Anchor",
     "EdgeAnchor",
     "GenericEdge",
+    "hookimpl",
     "JacTestCheck",
     "NodeAnchor",
-    "ObjectAnchor",
     "WalkerAnchor",
     "NodeArchitype",
     "EdgeArchitype",
@@ -58,9 +61,6 @@ __all__ = [
 ]
 
 
-hookimpl = pluggy.HookimplMarker("jac")
-
-
 class JacFeatureDefaults:
     """Jac Feature."""
 
@@ -68,28 +68,9 @@ class JacFeatureDefaults:
 
     @staticmethod
     @hookimpl
-    def context(session: str = "") -> ExecutionContext:
-        """Get the execution context."""
-        ctx = exec_context.get()
-        if ctx is None:
-            ctx = ExecutionContext()
-            exec_context.set(ctx)
-        return ctx
-
-    @staticmethod
-    @hookimpl
-    def reset_context() -> None:
-        """Reset the execution context."""
-        ctx = exec_context.get()
-        if ctx:
-            ctx.reset()
-        exec_context.set(None)
-
-    @staticmethod
-    @hookimpl
-    def memory_hook() -> Memory | None:
-        """Return the memory hook."""
-        return Jac.context().mem
+    def get_context() -> ExecutionContext:
+        """Get current execution context."""
+        return ExecutionContext.get()
 
     @staticmethod
     @hookimpl
@@ -203,6 +184,43 @@ class JacFeatureDefaults:
 
     @staticmethod
     @hookimpl
+    def impl_patch_filename(
+        file_loc: str,
+    ) -> Callable[[Callable[P, T]], Callable[P, T]]:
+        """Update impl file location."""
+
+        def decorator(func: Callable[P, T]) -> Callable[P, T]:
+            try:
+                code = func.__code__
+                new_code = types.CodeType(
+                    code.co_argcount,
+                    code.co_posonlyargcount,
+                    code.co_kwonlyargcount,
+                    code.co_nlocals,
+                    code.co_stacksize,
+                    code.co_flags,
+                    code.co_code,
+                    code.co_consts,
+                    code.co_names,
+                    code.co_varnames,
+                    file_loc,
+                    code.co_name,
+                    code.co_qualname,
+                    code.co_firstlineno,
+                    code.co_linetable,
+                    code.co_exceptiontable,
+                    code.co_freevars,
+                    code.co_cellvars,
+                )
+                func.__code__ = new_code
+            except AttributeError:
+                pass
+            return func
+
+        return decorator
+
+    @staticmethod
+    @hookimpl
     def jac_import(
         target: str,
         base_path: str,
@@ -210,9 +228,9 @@ class JacFeatureDefaults:
         cachable: bool,
         mdl_alias: Optional[str],
         override_name: Optional[str],
-        mod_bundle: Optional[Module | str],
         lng: Optional[str],
         items: Optional[dict[str, Union[str, Optional[str]]]],
+        reload_module: Optional[bool],
     ) -> tuple[types.ModuleType, ...]:
         """Core Import Process."""
         spec = ImportPathSpec(
@@ -222,14 +240,21 @@ class JacFeatureDefaults:
             cachable,
             mdl_alias,
             override_name,
-            mod_bundle,
             lng,
             items,
         )
+
+        jac_machine = JacMachine.get(base_path)
+        if not jac_machine.jac_program:
+            jac_machine.attach_program(JacProgram(mod_bundle=None, bytecode=None))
+
         if lng == "py":
-            import_result = PythonImporter(Jac.context().jac_machine).run_import(spec)
+            import_result = PythonImporter(JacMachine.get()).run_import(spec)
         else:
-            import_result = JacImporter(Jac.context().jac_machine).run_import(spec)
+            import_result = JacImporter(JacMachine.get()).run_import(
+                spec, reload_module
+            )
+
         return (
             (import_result.ret_mod,)
             if absorb or not items
@@ -327,9 +352,9 @@ class JacFeatureDefaults:
     def spawn_call(op1: Architype, op2: Architype) -> WalkerArchitype:
         """Jac's spawn operator feature."""
         if isinstance(op1, WalkerArchitype):
-            return op1._jac_.spawn_call(op2)
+            return op1.__jac__.spawn_call(op2.__jac__)
         elif isinstance(op2, WalkerArchitype):
-            return op2._jac_.spawn_call(op1)
+            return op2.__jac__.spawn_call(op1.__jac__)
         else:
             raise TypeError("Invalid walker object")
 
@@ -351,7 +376,12 @@ class JacFeatureDefaults:
         ),
     ) -> bool:
         """Jac's ignore stmt feature."""
-        return walker._jac_.ignore_node(expr)
+        if isinstance(walker, WalkerArchitype):
+            return walker.__jac__.ignore_node(
+                (i.__jac__ for i in expr) if isinstance(expr, list) else [expr.__jac__]
+            )
+        else:
+            raise TypeError("Invalid walker object")
 
     @staticmethod
     @hookimpl
@@ -367,7 +397,9 @@ class JacFeatureDefaults:
     ) -> bool:
         """Jac's visit stmt feature."""
         if isinstance(walker, WalkerArchitype):
-            return walker._jac_.visit_node(expr)
+            return walker.__jac__.visit_node(
+                (i.__jac__ for i in expr) if isinstance(expr, list) else [expr.__jac__]
+            )
         else:
             raise TypeError("Invalid walker object")
 
@@ -375,7 +407,7 @@ class JacFeatureDefaults:
     @hookimpl
     def disengage(walker: WalkerArchitype) -> bool:  # noqa: ANN401
         """Jac's disengage stmt feature."""
-        walker._jac_.disengage_now()
+        walker.__jac__.disengage_now()
         return True
 
     @staticmethod
@@ -398,7 +430,7 @@ class JacFeatureDefaults:
         if edges_only:
             connected_edges: list[EdgeArchitype] = []
             for node in node_obj:
-                connected_edges += node._jac_.get_edges(
+                connected_edges += node.__jac__.get_edges(
                     dir, filter_func, target_obj=targ_obj_set
                 )
             return list(set(connected_edges))
@@ -406,7 +438,9 @@ class JacFeatureDefaults:
             connected_nodes: list[NodeArchitype] = []
             for node in node_obj:
                 connected_nodes.extend(
-                    node._jac_.edges_to_nodes(dir, filter_func, target_obj=targ_obj_set)
+                    node.__jac__.edges_to_nodes(
+                        dir, filter_func, target_obj=targ_obj_set
+                    )
                 )
             return list(set(connected_nodes))
 
@@ -415,7 +449,7 @@ class JacFeatureDefaults:
     def connect(
         left: NodeArchitype | list[NodeArchitype],
         right: NodeArchitype | list[NodeArchitype],
-        edge_spec: Callable[[], EdgeArchitype],
+        edge_spec: Callable[[NodeAnchor, NodeAnchor], EdgeArchitype],
         edges_only: bool,
     ) -> list[NodeArchitype] | list[EdgeArchitype]:
         """Jac's connect operator feature.
@@ -425,17 +459,16 @@ class JacFeatureDefaults:
         left = [left] if isinstance(left, NodeArchitype) else left
         right = [right] if isinstance(right, NodeArchitype) else right
         edges = []
+
+        root = Jac.get_root().__jac__
+
         for i in left:
-            for j in right:
-                conn_edge = edge_spec()
-                edges.append(conn_edge)
-                i._jac_.connect_node(j, conn_edge)
-
-                if i._jac_.persistent or j._jac_.persistent:
-                    conn_edge.save()
-                    j.save()
-                    i.save()
-
+            _left = i.__jac__
+            if root.has_connect_access(_left):
+                for j in right:
+                    _right = j.__jac__
+                    if root.has_connect_access(_right):
+                        edges.append(edge_spec(_left, _right))
         return right if not edges_only else edges
 
     @staticmethod
@@ -450,26 +483,36 @@ class JacFeatureDefaults:
         disconnect_occurred = False
         left = [left] if isinstance(left, NodeArchitype) else left
         right = [right] if isinstance(right, NodeArchitype) else right
+
+        root = Jac.get_root().__jac__
+
         for i in left:
-            for j in right:
-                edge_list: list[EdgeArchitype] = [*i._jac_.edges]
-                edge_list = filter_func(edge_list) if filter_func else edge_list
-                for e in edge_list:
-                    if e._jac_.target and e._jac_.source:
-                        if (
-                            dir in ["OUT", "ANY"]  # TODO: Not ideal
-                            and i._jac_.obj == e._jac_.source
-                            and e._jac_.target == j._jac_.obj
-                        ):
-                            e._jac_.detach(i._jac_.obj, e._jac_.target)
-                            disconnect_occurred = True
-                        if (
-                            dir in ["IN", "ANY"]
-                            and i._jac_.obj == e._jac_.target
-                            and e._jac_.source == j._jac_.obj
-                        ):
-                            e._jac_.detach(i._jac_.obj, e._jac_.source)
-                            disconnect_occurred = True
+            node = i.__jac__
+            for anchor in set(node.edges):
+                if (
+                    (source := anchor.source)
+                    and (target := anchor.target)
+                    and (not filter_func or filter_func([anchor.architype]))
+                    and source.architype
+                    and target.architype
+                ):
+                    if (
+                        dir in [EdgeDir.OUT, EdgeDir.ANY]
+                        and node == source
+                        and target.architype in right
+                        and root.has_write_access(target)
+                    ):
+                        anchor.destroy() if anchor.persistent else anchor.detach()
+                        disconnect_occurred = True
+                    if (
+                        dir in [EdgeDir.IN, EdgeDir.ANY]
+                        and node == target
+                        and source.architype in right
+                        and root.has_write_access(source)
+                    ):
+                        anchor.destroy() if anchor.persistent else anchor.detach()
+                        disconnect_occurred = True
+
         return disconnect_occurred
 
     @staticmethod
@@ -488,7 +531,7 @@ class JacFeatureDefaults:
     @hookimpl
     def get_root() -> Root:
         """Jac's assign comprehension feature."""
-        return Jac.context().get_root()
+        return ExecutionContext.get_root()
 
     @staticmethod
     @hookimpl
@@ -502,19 +545,23 @@ class JacFeatureDefaults:
         is_undirected: bool,
         conn_type: Optional[Type[EdgeArchitype] | EdgeArchitype],
         conn_assign: Optional[tuple[tuple, tuple]],
-    ) -> Callable[[], EdgeArchitype]:
+    ) -> Callable[[NodeAnchor, NodeAnchor], EdgeArchitype]:
         """Jac's root getter."""
         conn_type = conn_type if conn_type else GenericEdge
 
-        def builder() -> EdgeArchitype:
+        def builder(source: NodeAnchor, target: NodeAnchor) -> EdgeArchitype:
             edge = conn_type() if isinstance(conn_type, type) else conn_type
-            edge._jac_.is_undirected = is_undirected
+            edge.__attach__(source, target, is_undirected)
             if conn_assign:
                 for fld, val in zip(conn_assign[0], conn_assign[1]):
                     if hasattr(edge, fld):
                         setattr(edge, fld, val)
                     else:
                         raise ValueError(f"Invalid attribute: {fld}")
+            if source.persistent or target.persistent:
+                edge.__jac__.save()
+                target.save()
+                source.save()
             return edge
 
         return builder
@@ -635,11 +682,153 @@ class JacFeatureDefaults:
         inputs: list[tuple[str, str, str, Any]],
         outputs: tuple,
         action: str,
+        _globals: dict,
+        _locals: Mapping,
     ) -> Any:  # noqa: ANN401
         """Jac's with_llm feature."""
         raise ImportError(
-            "mtllm is not installed. Please install it with `pip install mtllm`."
+            "mtllm is not installed. Please install it with `pip install mtllm` and run `jac clean`."
         )
+
+    @staticmethod
+    @hookimpl
+    def gen_llm_body(_pass: PyastGenPass, node: ast.Ability) -> list[ast3.AST]:
+        """Generate the by LLM body."""
+        _pass.log_warning(
+            "MT-LLM is not installed. Please install it with `pip install mtllm`."
+        )
+        return [
+            _pass.sync(
+                ast3.Raise(
+                    _pass.sync(
+                        ast3.Call(
+                            func=_pass.sync(
+                                ast3.Name(id="ImportError", ctx=ast3.Load())
+                            ),
+                            args=[
+                                _pass.sync(
+                                    ast3.Constant(
+                                        value="mtllm is not installed. Please install it with `pip install mtllm` and run `jac clean`."  # noqa: E501
+                                    )
+                                )
+                            ],
+                            keywords=[],
+                        )
+                    )
+                )
+            )
+        ]
+
+    @staticmethod
+    @hookimpl
+    def by_llm_call(
+        _pass: PyastGenPass,
+        model: ast3.AST,
+        model_params: dict[str, ast.Expr],
+        scope: ast3.AST,
+        inputs: Sequence[Optional[ast3.AST]],
+        outputs: Sequence[Optional[ast3.AST]] | ast3.Call,
+        action: Optional[ast3.AST],
+        include_info: list[tuple[str, ast3.AST]],
+        exclude_info: list[tuple[str, ast3.AST]],
+    ) -> ast3.Call:
+        """Return the LLM Call, e.g. _Jac.with_llm()."""
+        _pass.log_warning(
+            "MT-LLM is not installed. Please install it with `pip install mtllm`."
+        )
+        return ast3.Call(
+            func=_pass.sync(
+                ast3.Attribute(
+                    value=_pass.sync(ast3.Name(id="_Jac", ctx=ast3.Load())),
+                    attr="with_llm",
+                    ctx=ast3.Load(),
+                )
+            ),
+            args=[],
+            keywords=[
+                _pass.sync(
+                    ast3.keyword(
+                        arg="file_loc",
+                        value=_pass.sync(ast3.Constant(value="None")),
+                    )
+                ),
+                _pass.sync(
+                    ast3.keyword(
+                        arg="model",
+                        value=_pass.sync(ast3.Constant(value="None")),
+                    )
+                ),
+                _pass.sync(
+                    ast3.keyword(
+                        arg="model_params",
+                        value=_pass.sync(ast3.Dict(keys=[], values=[])),
+                    )
+                ),
+                _pass.sync(
+                    ast3.keyword(
+                        arg="scope",
+                        value=_pass.sync(ast3.Constant(value="None")),
+                    )
+                ),
+                _pass.sync(
+                    ast3.keyword(
+                        arg="incl_info",
+                        value=_pass.sync(ast3.List(elts=[], ctx=ast3.Load())),
+                    )
+                ),
+                _pass.sync(
+                    ast3.keyword(
+                        arg="excl_info",
+                        value=_pass.sync(ast3.List(elts=[], ctx=ast3.Load())),
+                    )
+                ),
+                _pass.sync(
+                    ast3.keyword(
+                        arg="inputs",
+                        value=_pass.sync(ast3.List(elts=[], ctx=ast3.Load())),
+                    )
+                ),
+                _pass.sync(
+                    ast3.keyword(
+                        arg="outputs",
+                        value=_pass.sync(ast3.List(elts=[], ctx=ast3.Load())),
+                    )
+                ),
+                _pass.sync(
+                    ast3.keyword(
+                        arg="action",
+                        value=_pass.sync(ast3.Constant(value="None")),
+                    )
+                ),
+                _pass.sync(
+                    ast3.keyword(
+                        arg="_globals",
+                        value=_pass.sync(ast3.Constant(value="None")),
+                    )
+                ),
+                _pass.sync(
+                    ast3.keyword(
+                        arg="_locals",
+                        value=_pass.sync(ast3.Constant(value="None")),
+                    )
+                ),
+            ],
+        )
+
+    @staticmethod
+    @hookimpl
+    def get_by_llm_call_args(_pass: PyastGenPass, node: ast.FuncCall) -> dict:
+        """Get the by LLM call args."""
+        return {
+            "model": None,
+            "model_params": {},
+            "scope": None,
+            "inputs": [],
+            "outputs": [],
+            "action": None,
+            "include_info": [],
+            "exclude_info": [],
+        }
 
 
 class JacBuiltin:
@@ -714,14 +903,14 @@ class JacBuiltin:
         for source, target, edge in connections:
             dot_content += (
                 f"{visited_nodes.index(source)} -> {visited_nodes.index(target)} "
-                f' [label="{html.escape(str(edge._jac_.obj.__class__.__name__))} "];\n'
+                f' [label="{html.escape(str(edge.__jac__.architype.__class__.__name__))} "];\n'
             )
         for node_ in visited_nodes:
             color = (
                 colors[node_depths[node_]] if node_depths[node_] < 25 else colors[24]
             )
             dot_content += (
-                f'{visited_nodes.index(node_)} [label="{html.escape(str(node_._jac_.obj))}"'
+                f'{visited_nodes.index(node_)} [label="{html.escape(str(node_.__jac__.architype))}"'
                 f'fillcolor="{color}"];\n'
             )
         if dot_file:

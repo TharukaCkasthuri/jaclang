@@ -1,8 +1,8 @@
+from __future__ import annotations
+
 # flake8: noqa
 
 """Python function for testing py imports."""
-
-from __future__ import annotations
 
 
 def count_up_to(n: int):
@@ -277,3 +277,6 @@ def foo() -> None:
 
 
 foo()
+
+node = 90
+print(node)

@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
+import ast as ast3
 import types
-from typing import Any, Callable, Optional, Type, TypeAlias, Union
+from typing import Any, Callable, Mapping, Optional, Sequence, Type, TypeAlias, Union
 
-from jaclang.compiler.absyntree import Module
-from jaclang.plugin.default import ExecutionContext
-from jaclang.plugin.spec import JacBuiltin, JacCmdSpec, JacFeatureSpec, T
+import jaclang.compiler.absyntree as ast
+from jaclang.compiler.passes.main.pyast_gen_pass import PyastGenPass
+from jaclang.plugin.spec import JacBuiltin, JacCmdSpec, JacFeatureSpec, P, T
 from jaclang.runtimelib.constructs import (
     Architype,
     EdgeArchitype,
-    Memory,
+    NodeAnchor,
     NodeArchitype,
     Root,
     WalkerArchitype,
 )
+from jaclang.runtimelib.context import ExecutionContext
 
 import pluggy
 
@@ -28,10 +30,11 @@ pm.add_hookspecs(JacBuiltin)
 class JacFeature:
     """Jac Feature."""
 
-    import abc
-    from jaclang.compiler.constant import EdgeDir
-    from jaclang.runtimelib.constructs import DSFunc
+    from jaclang.compiler.constant import EdgeDir as EdgeDirType
+    from jaclang.runtimelib.constructs import DSFunc as DSFuncType
 
+    EdgeDir: TypeAlias = EdgeDirType
+    DSFunc: TypeAlias = DSFuncType
     RootType: TypeAlias = Root
     Obj: TypeAlias = Architype
     Node: TypeAlias = NodeArchitype
@@ -39,19 +42,9 @@ class JacFeature:
     Walker: TypeAlias = WalkerArchitype
 
     @staticmethod
-    def context(session: str = "") -> ExecutionContext:
-        """Create execution context."""
-        return pm.hook.context(session=session)
-
-    @staticmethod
-    def reset_context() -> None:
-        """Reset execution context."""
-        return pm.hook.reset_context()
-
-    @staticmethod
-    def memory_hook() -> Memory | None:
-        """Create memory abstraction."""
-        return pm.hook.memory_hook()
+    def get_context() -> ExecutionContext:
+        """Get current execution context."""
+        return pm.hook.get_context()
 
     @staticmethod
     def make_architype(
@@ -94,6 +87,13 @@ class JacFeature:
         return pm.hook.make_walker(on_entry=on_entry, on_exit=on_exit)
 
     @staticmethod
+    def impl_patch_filename(
+        file_loc: str,
+    ) -> Callable[[Callable[P, T]], Callable[P, T]]:
+        """Update impl file location."""
+        return pm.hook.impl_patch_filename(file_loc=file_loc)
+
+    @staticmethod
     def jac_import(
         target: str,
         base_path: str,
@@ -101,9 +101,9 @@ class JacFeature:
         cachable: bool = True,
         mdl_alias: Optional[str] = None,
         override_name: Optional[str] = None,
-        mod_bundle: Optional[Module | str] = None,
         lng: Optional[str] = "jac",
         items: Optional[dict[str, Union[str, Optional[str]]]] = None,
+        reload_module: Optional[bool] = False,
     ) -> tuple[types.ModuleType, ...]:
         """Core Import Process."""
         return pm.hook.jac_import(
@@ -113,9 +113,9 @@ class JacFeature:
             cachable=cachable,
             mdl_alias=mdl_alias,
             override_name=override_name,
-            mod_bundle=mod_bundle,
             lng=lng,
             items=items,
+            reload_module=reload_module,
         )
 
     @staticmethod
@@ -216,7 +216,7 @@ class JacFeature:
     def connect(
         left: NodeArchitype | list[NodeArchitype],
         right: NodeArchitype | list[NodeArchitype],
-        edge_spec: Callable[[], EdgeArchitype],
+        edge_spec: Callable[[NodeAnchor, NodeAnchor], EdgeArchitype],
         edges_only: bool = False,
     ) -> list[NodeArchitype] | list[EdgeArchitype]:
         """Jac's connect operator feature.
@@ -264,7 +264,7 @@ class JacFeature:
         is_undirected: bool,
         conn_type: Optional[Type[EdgeArchitype] | EdgeArchitype],
         conn_assign: Optional[tuple[tuple, tuple]],
-    ) -> Callable[[], EdgeArchitype]:
+    ) -> Callable[[NodeAnchor, NodeAnchor], EdgeArchitype]:
         """Jac's root getter."""
         return pm.hook.build_edge(
             is_undirected=is_undirected, conn_type=conn_type, conn_assign=conn_assign
@@ -300,6 +300,8 @@ class JacFeature:
         inputs: list[tuple[str, str, str, Any]],
         outputs: tuple,
         action: str,
+        _globals: dict,
+        _locals: Mapping,
     ) -> Any:  # noqa: ANN401
         """Jac's with_llm feature."""
         return pm.hook.with_llm(
@@ -312,7 +314,44 @@ class JacFeature:
             inputs=inputs,
             outputs=outputs,
             action=action,
+            _globals=_globals,
+            _locals=_locals,
         )
+
+    @staticmethod
+    def gen_llm_body(_pass: PyastGenPass, node: ast.Ability) -> list[ast3.AST]:
+        """Generate the by LLM body."""
+        return pm.hook.gen_llm_body(_pass=_pass, node=node)
+
+    @staticmethod
+    def by_llm_call(
+        _pass: PyastGenPass,
+        model: ast3.AST,
+        model_params: dict[str, ast.Expr],
+        scope: ast3.AST,
+        inputs: Sequence[Optional[ast3.AST]],
+        outputs: Sequence[Optional[ast3.AST]] | ast3.Call,
+        action: Optional[ast3.AST],
+        include_info: list[tuple[str, ast3.AST]],
+        exclude_info: list[tuple[str, ast3.AST]],
+    ) -> ast3.Call:
+        """Return the LLM Call, e.g. _Jac.with_llm()."""
+        return pm.hook.by_llm_call(
+            _pass=_pass,
+            model=model,
+            model_params=model_params,
+            scope=scope,
+            inputs=inputs,
+            outputs=outputs,
+            action=action,
+            include_info=include_info,
+            exclude_info=exclude_info,
+        )
+
+    @staticmethod
+    def get_by_llm_call_args(_pass: PyastGenPass, node: ast.FuncCall) -> dict:
+        """Get the by LLM call args."""
+        return pm.hook.get_by_llm_call_args(_pass=_pass, node=node)
 
 
 class JacCmd:

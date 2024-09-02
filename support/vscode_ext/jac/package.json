@@ -1,6 +1,6 @@
 {
   "name": "jaclang-extension",
-  "version": "2024.6.16",
+  "version": "2024.8.14",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
   "publisher": "jaseci-labs",
@@ -17,6 +17,7 @@
   },
   "categories": [
     "Programming Languages",
+    "Debuggers",
     "Linters",
     "Formatters",
     "Snippets",
@@ -27,6 +28,25 @@
     "vscode": "^1.89.0"
   },
   "contributes": {
+
+    "debuggers": [
+      {
+        "type": "jacdebug",
+        "label": "Jac Debug",
+
+        "initialConfigurations": [
+          {
+            "type": "debugpy",
+            "request": "launch",
+            "name": "Run a jac file",
+            "program": "${command:extension.jaclang-extension.getJacPath}",
+            "args" : "run ${file}"
+          }
+        ]
+
+      }
+    ],
+
     "languages": [
       {
         "id": "jac",
@@ -61,6 +81,9 @@
     "deploy": "vsce publish --yarn",
     "vsce-package": "mkdir build && vsce package -o build/jac.vsix"
   },
+  "extensionDependencies": [
+    "ms-python.python"
+  ],
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
   },

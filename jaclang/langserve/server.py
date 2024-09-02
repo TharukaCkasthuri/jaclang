@@ -9,6 +9,7 @@ from jaclang.compiler.constant import (
     JacSemTokenType as SemTokType,
 )
 from jaclang.langserve.engine import JacLangServer
+from jaclang.settings import settings
 
 import lsprotocol.types as lspt
 
@@ -16,8 +17,14 @@ server = JacLangServer()
 
 
 @server.feature(lspt.TEXT_DOCUMENT_DID_OPEN)
-@server.feature(lspt.TEXT_DOCUMENT_DID_SAVE)
 async def did_open(ls: JacLangServer, params: lspt.DidOpenTextDocumentParams) -> None:
+    """Check syntax on change."""
+    ls.deep_check(params.text_document.uri)
+    ls.lsp.send_request(lspt.WORKSPACE_SEMANTIC_TOKENS_REFRESH)
+
+
+@server.feature(lspt.TEXT_DOCUMENT_DID_SAVE)
+async def did_save(ls: JacLangServer, params: lspt.DidOpenTextDocumentParams) -> None:
     """Check syntax on change."""
     await ls.launch_deep_check(params.text_document.uri)
     ls.lsp.send_request(lspt.WORKSPACE_SEMANTIC_TOKENS_REFRESH)
@@ -32,8 +39,8 @@ async def did_change(
     if file_path in ls.modules:
         document = ls.workspace.get_text_document(file_path)
         lines = document.source.splitlines()
-        ls.modules[file_path].update_sem_tokens(
-            params, ls.modules[file_path].sem_tokens, lines
+        ls.modules[file_path].sem_manager.update_sem_tokens(
+            params, ls.modules[file_path].sem_manager.sem_tokens, lines
         )
         ls.lsp.send_request(lspt.WORKSPACE_SEMANTIC_TOKENS_REFRESH)
 
@@ -131,6 +138,15 @@ def references(ls: JacLangServer, params: lspt.ReferenceParams) -> list[lspt.Loc
     return ls.get_references(params.text_document.uri, params.position)
 
 
+@server.feature(lspt.TEXT_DOCUMENT_RENAME)
+def rename(
+    ls: JacLangServer, params: lspt.RenameParams
+) -> Optional[lspt.WorkspaceEdit]:
+    """Rename symbol."""
+    ls.log_warning("Auto Rename is Experimental, Please use with caution.")
+    return ls.rename_symbol(params.text_document.uri, params.position, params.new_name)
+
+
 @server.feature(
     lspt.TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
     lspt.SemanticTokensLegend(
@@ -147,6 +163,7 @@ def semantic_tokens_full(
 
 def run_lang_server() -> None:
     """Run the language server."""
+    settings.pass_timer = True
     server.start_io()
 
 

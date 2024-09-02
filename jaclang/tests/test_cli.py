@@ -5,6 +5,7 @@ import io
 import os
 import subprocess
 import sys
+import traceback
 
 from jaclang.cli import cli
 from jaclang.plugin.builtin import dotgen
@@ -38,7 +39,7 @@ class JacCliTests(TestCase):
         sys.stderr = captured_output
 
         try:
-            cli.enter(self.fixture_abs_path("err2.jac"), entrypoint="speak", args=[])  # type: ignore
+            cli.enter(self.fixture_abs_path("err2.jac"), entrypoint="speak", args=[])
         except Exception as e:
             print(f"Error: {e}")
 
@@ -47,6 +48,65 @@ class JacCliTests(TestCase):
         stdout_value = captured_output.getvalue()
         # print(stdout_value)
         self.assertIn("Error", stdout_value)
+
+    def test_jac_cli_alert_based_runtime_err(self) -> None:
+        """Basic test for pass."""
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+        sys.stderr = captured_output
+
+        try:
+            cli.run(self.fixture_abs_path("err_runtime.jac"))
+        except Exception as e:
+            print(f"Error: {e}")
+
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+
+        expected_stdout_values = (
+            "Error: list index out of range",
+            "    print(some_list[invalid_index]);",
+            "          ^^^^^^^^^^^^^^^^^^^^^^^^",
+            "  at bar() ",
+            "  at foo() ",
+            "  at <module> ",
+        )
+
+        logger_capture = "\n".join([rec.message for rec in self.caplog.records])
+        for exp in expected_stdout_values:
+            self.assertIn(exp, logger_capture)
+
+    def test_jac_impl_err(self) -> None:
+        """Basic test for pass."""
+        if "jaclang.tests.fixtures.err" in sys.modules:
+            del sys.modules["jaclang.tests.fixtures.err"]
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+        sys.stderr = captured_output
+
+        try:
+            cli.enter(self.fixture_abs_path("err.jac"), entrypoint="speak", args=[])
+        except Exception:
+            traceback.print_exc()
+
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+        stdout_value = captured_output.getvalue()
+        # print(stdout_value)
+        path_to_file = self.fixture_abs_path("err.impl.jac")
+        self.assertIn(f'"{path_to_file}", line 2', stdout_value)
+
+    def test_jac_test_err(self) -> None:
+        """Basic test for pass."""
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+        sys.stderr = captured_output
+        cli.test(self.fixture_abs_path("baddy.jac"))
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+        stdout_value = captured_output.getvalue()
+        path_to_file = self.fixture_abs_path("baddy.test.jac")
+        self.assertIn(f'"{path_to_file}", line 2,', stdout_value)
 
     def test_jac_ast_tool_pass_template(self) -> None:
         """Basic test for pass."""
@@ -84,6 +144,52 @@ class JacCliTests(TestCase):
         stdout_value = captured_output.getvalue()
         self.assertIn("+-- Token", stdout_value)
 
+    def test_import_mod_abs_path(self) -> None:
+        """Testing for print AstTool."""
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+
+        cli.tool("ir", ["ast", f"{self.fixture_abs_path('import.jac')}"])
+
+        sys.stdout = sys.__stdout__
+        stdout_value = captured_output.getvalue()
+        self.assertRegex(
+            stdout_value,
+            r"1\:11 \- 1\:13.*ModulePath - os - abs_path\:.*typeshed/stdlib/os/__init__.pyi",
+        )
+        self.assertRegex(
+            stdout_value,
+            r"2\:11 \- 2\:14.*ModulePath - sys - abs_path\:.*typeshed/stdlib/sys/__init__.pyi",
+        )
+        self.assertRegex(
+            stdout_value,
+            r"3\:11 \- 3\:17.*ModulePath - pyfunc - abs_path\:.*fixtures/pyfunc.py",
+        )
+        self.assertRegex(
+            stdout_value,
+            r"4\:11 \- 4\:28.*ModulePath - pygame_mock - abs_path\:.*fixtures/pygame_mock/inner/__init__.py",
+        )
+        self.assertRegex(
+            stdout_value,
+            r"6\:11 \- 6\:15.*ModulePath - math - abs_path\:.*typeshed/stdlib/math.pyi",
+        )
+        self.assertRegex(
+            stdout_value,
+            r"7\:11 \- 7\:19.*ModulePath - argparse - abs_path\:.*typeshed/stdlib/argparse.pyi",
+        )
+        self.assertRegex(
+            stdout_value,
+            r"8\:16 \- 8\:27.*ModulePath - pygame_mock - abs_path\:.*fixtures/pygame_mock/__init__.py",
+        )
+        self.assertRegex(
+            stdout_value,
+            r"8\:30 \- 8:35.*ModuleItem - color - abs_path\:.*fixtures/pygame_mock/color.py",
+        )
+        self.assertRegex(
+            stdout_value,
+            r"8\:37 \- 8:44.*ModuleItem - display - abs_path\:.*fixtures/pygame_mock/display.py",
+        )
+
     def test_ast_dotgen(self) -> None:
         """Testing for print AstTool."""
         captured_output = io.StringIO()
@@ -102,7 +208,7 @@ class JacCliTests(TestCase):
         cli.check(f"{self.fixture_abs_path('game1.jac')}")
         sys.stdout = sys.__stdout__
         stdout_value = captured_output.getvalue()
-        self.assertIn("Errors: 0, Warnings: 1", stdout_value)
+        self.assertIn("Errors: 0, Warnings: 2", stdout_value)
 
     def test_type_info(self) -> None:
         """Testing for type info inside the ast tool."""

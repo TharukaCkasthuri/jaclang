@@ -2,28 +2,41 @@
 
 from __future__ import annotations
 
+import ast as ast3
 import types
-from typing import Any, Callable, Optional, TYPE_CHECKING, Type, TypeVar, Union
+from typing import (
+    Any,
+    Callable,
+    Mapping,
+    Optional,
+    ParamSpec,
+    Sequence,
+    TYPE_CHECKING,
+    Type,
+    TypeVar,
+    Union,
+)
 
-from jaclang.compiler.absyntree import Module
+import jaclang.compiler.absyntree as ast
+from jaclang.compiler.passes.main.pyast_gen_pass import PyastGenPass
 
 if TYPE_CHECKING:
-    from jaclang.runtimelib.constructs import EdgeArchitype, NodeArchitype
     from jaclang.plugin.default import (
         Architype,
         EdgeDir,
-        ExecutionContext,
         WalkerArchitype,
         Root,
         DSFunc,
     )
-    from jaclang.runtimelib.memory import Memory
+    from jaclang.runtimelib.constructs import EdgeArchitype, NodeAnchor, NodeArchitype
+    from jaclang.runtimelib.context import ExecutionContext
 
 import pluggy
 
 hookspec = pluggy.HookspecMarker("jac")
 
 T = TypeVar("T")
+P = ParamSpec("P")
 
 
 class JacFeatureSpec:
@@ -31,20 +44,8 @@ class JacFeatureSpec:
 
     @staticmethod
     @hookspec(firstresult=True)
-    def context(session: str = "") -> ExecutionContext:
-        """Get the execution context."""
-        raise NotImplementedError
-
-    @staticmethod
-    @hookspec(firstresult=True)
-    def reset_context() -> None:
-        """Reset the execution context."""
-        raise NotImplementedError
-
-    @staticmethod
-    @hookspec(firstresult=True)
-    def memory_hook() -> Memory | None:
-        """Create memory abstraction."""
+    def get_context() -> ExecutionContext:
+        """Get current execution context."""
         raise NotImplementedError
 
     @staticmethod
@@ -92,6 +93,14 @@ class JacFeatureSpec:
 
     @staticmethod
     @hookspec(firstresult=True)
+    def impl_patch_filename(
+        file_loc: str,
+    ) -> Callable[[Callable[P, T]], Callable[P, T]]:
+        """Update impl file location."""
+        raise NotImplementedError
+
+    @staticmethod
+    @hookspec(firstresult=True)
     def jac_import(
         target: str,
         base_path: str,
@@ -99,9 +108,9 @@ class JacFeatureSpec:
         cachable: bool,
         mdl_alias: Optional[str],
         override_name: Optional[str],
-        mod_bundle: Optional[Module | str],
         lng: Optional[str],
         items: Optional[dict[str, Union[str, Optional[str]]]],
+        reload_module: Optional[bool],
     ) -> tuple[types.ModuleType, ...]:
         """Core Import Process."""
         raise NotImplementedError
@@ -202,7 +211,7 @@ class JacFeatureSpec:
     def connect(
         left: NodeArchitype | list[NodeArchitype],
         right: NodeArchitype | list[NodeArchitype],
-        edge_spec: Callable[[], EdgeArchitype],
+        edge_spec: Callable[[NodeAnchor, NodeAnchor], EdgeArchitype],
         edges_only: bool,
     ) -> list[NodeArchitype] | list[EdgeArchitype]:
         """Jac's connect operator feature.
@@ -248,7 +257,7 @@ class JacFeatureSpec:
         is_undirected: bool,
         conn_type: Optional[Type[EdgeArchitype] | EdgeArchitype],
         conn_assign: Optional[tuple[tuple, tuple]],
-    ) -> Callable[[], EdgeArchitype]:
+    ) -> Callable[[NodeAnchor, NodeAnchor], EdgeArchitype]:
         """Jac's root getter."""
         raise NotImplementedError
 
@@ -283,8 +292,38 @@ class JacFeatureSpec:
         inputs: list[tuple[str, str, str, Any]],
         outputs: tuple,
         action: str,
+        _globals: dict,
+        _locals: Mapping,
     ) -> Any:  # noqa: ANN401
         """Jac's with_llm stmt feature."""
+        raise NotImplementedError
+
+    @staticmethod
+    @hookspec(firstresult=True)
+    def gen_llm_body(_pass: PyastGenPass, node: ast.Ability) -> list[ast3.AST]:
+        """Generate the by LLM body."""
+        raise NotImplementedError
+
+    @staticmethod
+    @hookspec(firstresult=True)
+    def by_llm_call(
+        _pass: PyastGenPass,
+        model: ast3.AST,
+        model_params: dict[str, ast.Expr],
+        scope: ast3.AST,
+        inputs: Sequence[Optional[ast3.AST]],
+        outputs: Sequence[Optional[ast3.AST]] | ast3.Call,
+        action: Optional[ast3.AST],
+        include_info: list[tuple[str, ast3.AST]],
+        exclude_info: list[tuple[str, ast3.AST]],
+    ) -> ast3.Call:
+        """Return the LLM Call, e.g. _Jac.with_llm()."""
+        raise NotImplementedError
+
+    @staticmethod
+    @hookspec(firstresult=True)
+    def get_by_llm_call_args(_pass: PyastGenPass, node: ast.FuncCall) -> dict:
+        """Get the by LLM call args."""
         raise NotImplementedError
 
 

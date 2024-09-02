@@ -14,7 +14,6 @@ from jaclang.compiler.codeloc import CodeLocInfo
 from jaclang.compiler.constant import SymbolType
 from jaclang.compiler.passes.transform import Alert
 from jaclang.compiler.symtable import Symbol, SymbolTable
-from jaclang.utils.helpers import import_target_to_relative_path
 from jaclang.vendor.pygls import uris
 
 import lsprotocol.types as lspt
@@ -89,17 +88,45 @@ def sym_tab_list(sym_tab: SymbolTable, file_path: str) -> list[SymbolTable]:
     return sym_tabs
 
 
-def find_node_by_position(
-    tokens: list[tuple[lspt.Position, int, int, ast.AstSymbolNode]],
-    line: int,
-    position: int,
+def find_deepest_symbol_node_at_pos(
+    node: ast.AstNode, line: int, character: int
 ) -> Optional[ast.AstSymbolNode]:
     """Return the deepest symbol node that contains the given position."""
-    for token in tokens:
-        pos, token_end, length, node = token
-        if pos.line == line and pos.character <= position < token_end:
-            return node
-    return None
+    last_symbol_node = None
+
+    if position_within_node(node, line, character):
+        if isinstance(node, ast.AstSymbolNode):
+            last_symbol_node = node
+
+        for child in [i for i in node.kid if i.loc.mod_path == node.loc.mod_path]:
+            if position_within_node(child, line, character):
+                deeper_node = find_deepest_symbol_node_at_pos(child, line, character)
+                if deeper_node is not None:
+                    last_symbol_node = deeper_node
+
+    return last_symbol_node
+
+
+def position_within_node(node: ast.AstNode, line: int, character: int) -> bool:
+    """Check if the position falls within the node's location."""
+    if node.loc.first_line < line + 1 < node.loc.last_line:
+        return True
+    if (
+        node.loc.first_line == line + 1
+        and node.loc.col_start <= character + 1
+        and (
+            node.loc.last_line == line + 1
+            and node.loc.col_end >= character + 1
+            or node.loc.last_line > line + 1
+        )
+    ):
+        return True
+    if (
+        node.loc.last_line == line + 1
+        and node.loc.col_start <= character + 1 <= node.loc.col_end
+    ):
+        return True
+    return False
 
 
 def find_index(
@@ -246,19 +273,20 @@ def label_map(sub_tab: SymbolType) -> lspt.CompletionItemKind:
     )
 
 
-def get_mod_path(mod_path: ast.ModulePath, name_node: ast.Name) -> str | None:
+def get_mod_path(
+    mod_path: ast.ModulePath, name_node: ast.Name
+) -> str | None:  # TODO: This should go away
     """Get path for a module import name."""
     ret_target = None
-    module_location_path = mod_path.loc.mod_path
     if mod_path.parent and (
         (
             isinstance(mod_path.parent.parent, ast.Import)
-            and mod_path.parent.parent.hint.tag.value == "py"
+            and mod_path.parent.parent.is_py
         )
         or (
             isinstance(mod_path.parent, ast.Import)
             and mod_path.parent.from_loc
-            and mod_path.parent.hint.tag.value == "py"
+            and mod_path.parent.is_py
         )
     ):
         if mod_path.path and name_node in mod_path.path:
@@ -268,39 +296,35 @@ def get_mod_path(mod_path: ast.ModulePath, name_node: ast.Name) -> str | None:
                 else ""
             )
         else:
-            temporary_path_str = mod_path.path_str
-        sys.path.append(os.path.dirname(module_location_path))
+            temporary_path_str = mod_path.dot_path_str
+        sys.path.append(os.path.dirname(mod_path.loc.mod_path))
         spec = importlib.util.find_spec(temporary_path_str)
-        sys.path.remove(os.path.dirname(module_location_path))
+        sys.path.remove(os.path.dirname(mod_path.loc.mod_path))
         if spec and spec.origin and spec.origin.endswith(".py"):
             ret_target = spec.origin
     elif mod_path.parent and (
         (
             isinstance(mod_path.parent.parent, ast.Import)
-            and mod_path.parent.parent.hint.tag.value == "jac"
+            and mod_path.parent.parent.is_jac
         )
         or (
             isinstance(mod_path.parent, ast.Import)
             and mod_path.parent.from_loc
-            and mod_path.parent.hint.tag.value == "jac"
+            and mod_path.parent.is_jac
         )
     ):
-        ret_target = import_target_to_relative_path(
-            level=mod_path.level,
-            target=mod_path.path_str,
-            base_path=os.path.dirname(module_location_path),
-        )
+        ret_target = mod_path.resolve_relative_path()
     return ret_target
 
 
 def get_item_path(mod_item: ast.ModuleItem) -> tuple[str, tuple[int, int]] | None:
     """Get path."""
     item_name = mod_item.name.value
-    if mod_item.from_parent.hint.tag.value == "py" and mod_item.from_parent.from_loc:
+    if mod_item.from_parent.is_py and mod_item.from_parent.from_loc:
         path = get_mod_path(mod_item.from_parent.from_loc, mod_item.name)
         if path:
             return get_definition_range(path, item_name)
-    elif mod_item.from_parent.hint.tag.value == "jac":
+    elif mod_item.from_parent.is_jac:
         mod_node = mod_item.from_mod_path
         if mod_node.sub_module and mod_node.sub_module._sym_tab:
             for symbol_name, symbol in mod_node.sub_module._sym_tab.tab.items():
@@ -357,7 +381,7 @@ def collect_all_symbols_in_scope(
     while current_tab is not None and current_tab not in visited:
         visited.add(current_tab)
         for name, symbol in current_tab.tab.items():
-            if name not in dir(builtins):
+            if name not in dir(builtins) and symbol.sym_type != SymbolType.IMPL:
                 symbols.append(
                     lspt.CompletionItem(label=name, kind=label_map(symbol.sym_type))
                 )
@@ -369,26 +393,32 @@ def collect_all_symbols_in_scope(
 
 def parse_symbol_path(text: str, dot_position: int) -> list[str]:
     """Parse text and return a list of symbols."""
-    text = text[:dot_position].strip()
-    pattern = re.compile(r"\b\w+\(\)?|\b\w+\b")
-    matches = pattern.findall(text)
-    if text.endswith("."):
-        matches.append("")
-    symbol_path = []
-    i = 0
-    while i < len(matches):
-        if matches[i].endswith("("):
-            i += 1
-            continue
-        elif "(" in matches[i]:
-            symbol_path.append(matches[i])
-        elif matches[i] == "":
-            pass
-        else:
-            symbol_path.append(matches[i])
-        i += 1
+    text = text[:dot_position][:-1].strip()
+    valid_character_pattern = re.compile(r"[a-zA-Z0-9_]")
 
-    return symbol_path
+    reversed_text = text[::-1]
+    all_words = []
+    current_word = []
+    for char in reversed_text:
+        if valid_character_pattern.fullmatch(char):
+            current_word.append(char)
+        elif char == ".":
+            if current_word:
+                all_words.append("".join(current_word[::-1]))
+                current_word = []
+        else:
+            if current_word:
+                all_words.append("".join(current_word[::-1]))
+                current_word = []
+            break
+
+    all_words = (
+        all_words[::-1]
+        if not current_word
+        else ["".join(current_word[::-1])] + all_words[::-1]
+    )
+
+    return all_words
 
 
 def resolve_symbol_path(sym_name: str, node_tab: SymbolTable) -> str:
@@ -401,6 +431,11 @@ def resolve_symbol_path(sym_name: str, node_tab: SymbolTable) -> str:
         for name, symbol in current_tab.tab.items():
             if name not in dir(builtins) and name == sym_name:
                 path = symbol.defn[0]._sym_type
+                if symbol.sym_type == SymbolType.ENUM_ARCH:
+                    if isinstance(current_tab.owner, ast.Module):
+                        return current_tab.owner.name + "." + sym_name
+                    elif isinstance(current_tab.owner, ast.AstSymbolNode):
+                        return current_tab.owner.name_spec._sym_type + "." + sym_name
                 return path
         current_tab = current_tab.parent if current_tab.parent != current_tab else None
     return ""
@@ -491,7 +526,8 @@ def resolve_completion_symbol_table(
             )
     else:
         completion_items = []
-
+    if isinstance(current_symbol_table.owner, (ast.Ability, ast.AbilityDef)):
+        return completion_items
     completion_items.extend(
         collect_all_symbols_in_scope(current_symbol_table, up_tree=False)
     )
@@ -591,3 +627,20 @@ def get_line_of_code(line_number: int, lines: list[str]) -> Optional[tuple[str, 
             else first_non_space
         )
     return None
+
+
+def add_unique_text_edit(
+    changes: dict[str, list[lspt.TextEdit]], key: str, new_edit: lspt.TextEdit
+) -> None:
+    """Add a new text edit to the changes dictionary if it is unique."""
+    if key not in changes:
+        changes[key] = [new_edit]
+    else:
+        for existing_edit in changes[key]:
+            if (
+                existing_edit.range.start == new_edit.range.start
+                and existing_edit.range.end == new_edit.range.end
+                and existing_edit.new_text == new_edit.new_text
+            ):
+                return
+        changes[key].append(new_edit)

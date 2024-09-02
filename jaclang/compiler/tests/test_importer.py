@@ -5,29 +5,37 @@ import sys
 
 from jaclang import jac_import
 from jaclang.cli import cli
-from jaclang.plugin.feature import JacFeature as Jac
+from jaclang.runtimelib.machine import JacMachine, JacProgram
 from jaclang.utils.test import TestCase
 
 
 class TestLoader(TestCase):
     """Test Jac self.prse."""
 
-    def setUp(self) -> None:
-        """Set up test."""
-        return super().setUp()
-
     def test_import_basic_python(self) -> None:
         """Test basic self loading."""
-        Jac.context().init_memory(base_path=self.fixture_abs_path(__file__))
+        JacMachine(self.fixture_abs_path(__file__)).attach_program(
+            JacProgram(mod_bundle=None, bytecode=None)
+        )
         (h,) = jac_import("fixtures.hello_world", base_path=__file__)
         self.assertEqual(h.hello(), "Hello World!")  # type: ignore
+        JacMachine.detach()
 
     def test_modules_correct(self) -> None:
         """Test basic self loading."""
-        Jac.context().init_memory(base_path=self.fixture_abs_path(__file__))
+        JacMachine(self.fixture_abs_path(__file__)).attach_program(
+            JacProgram(mod_bundle=None, bytecode=None)
+        )
         jac_import("fixtures.hello_world", base_path=__file__)
-        self.assertIn("module 'hello_world'", str(sys.modules))
-        self.assertIn("/tests/fixtures/hello_world.jac", str(sys.modules))
+        self.assertIn(
+            "module 'fixtures.hello_world'",
+            str(JacMachine.get().loaded_modules),
+        )
+        self.assertIn(
+            "/tests/fixtures/hello_world.jac",
+            str(JacMachine.get().loaded_modules),
+        )
+        JacMachine.detach()
 
     def test_jac_py_import(self) -> None:
         """Basic test for pass."""
@@ -42,11 +50,15 @@ class TestLoader(TestCase):
             stdout_value,
         )
 
-    def test_package_import(self) -> None:
-        """Test package import."""
+    def test_jac_py_import_auto(self) -> None:
+        """Basic test for pass."""
         captured_output = io.StringIO()
         sys.stdout = captured_output
-        cli.run(self.fixture_abs_path("../../../tests/fixtures/package_import.jac"))
+        cli.run(self.fixture_abs_path("../../../tests/fixtures/jp_importer_auto.jac"))
         sys.stdout = sys.__stdout__
         stdout_value = captured_output.getvalue()
-        self.assertEqual("package is imported successfully!\n", stdout_value)
+        self.assertIn("Hello World!", stdout_value)
+        self.assertIn(
+            "{SomeObj(a=10): 'check'} [MyObj(apple=5, banana=7), MyObj(apple=5, banana=7)]",
+            stdout_value,
+        )
